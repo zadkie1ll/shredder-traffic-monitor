@@ -1,0 +1,16 @@
+services:
+  shredder-traffic-monitor:
+    container_name: shredder-traffic-monitor
+    restart: unless-stopped
+    network_mode: host
+    image: shredder-traffic-monitor:v0.1
+    env_file:
+      - .env
+    build:
+      context: .
+      dockerfile: Dockerfile
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
