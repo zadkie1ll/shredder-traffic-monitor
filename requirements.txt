@@ -1,6 +1,7 @@
 sqlalchemy==2.0.41
 greenlet==3.2.3
 asyncpg==0.30.0
+psycopg2-binary==2.9.10
 alembic==1.16.1
 grpcio==1.68.1
 protobuf==6.31.1
