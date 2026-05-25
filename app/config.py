@@ -91,12 +91,12 @@ class Settings:
             pg_db=pg_db or "",
             anomaly_threshold_bytes=_get_int(
                 "TRAFFIC_MONITOR_ANOMALY_THRESHOLD_BYTES",
-                200 * GIB,
+                50 * GIB,
             ),
             auto_block_enabled=_get_bool("TRAFFIC_MONITOR_AUTO_BLOCK_ENABLED"),
             auto_block_threshold_bytes=_get_int(
                 "TRAFFIC_MONITOR_AUTO_BLOCK_THRESHOLD_BYTES",
-                500 * GIB,
+                100 * GIB,
             ),
             create_schema=_get_bool("TRAFFIC_MONITOR_CREATE_SCHEMA"),
         )

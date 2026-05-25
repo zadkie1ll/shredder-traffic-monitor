@@ -4,6 +4,8 @@ Worker for monitoring Remnawave user traffic deltas.
 
 The service reads users from Remnawave, matches them with `common.models.db.User`
 by username, and keeps one compact row per user in `user_traffic_anomalies`.
+By default it checks traffic every 10 minutes, marks a user suspicious at
+50 GiB delta, and can auto-block at 100 GiB delta when auto-blocking is enabled.
 
 Stored values:
 
