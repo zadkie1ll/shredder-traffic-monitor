@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -23,6 +23,7 @@ class TrafficMonitorResult:
     suspicious_users: int
     blocked_users: int
     notifications_sent: int
+    skipped_long_subscriptions: int
 
 
 class TrafficMonitor:
@@ -63,7 +64,7 @@ class TrafficMonitor:
         rwms_users = await self._get_all_rwms_users()
         if not rwms_users:
             self._log.warning("RWMS returned no users; skipping traffic check")
-            return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0)
+            return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0, 0)
 
         rwms_by_username = {
             user.username: user
@@ -72,15 +73,22 @@ class TrafficMonitor:
         }
 
         async with self._session_maker() as session:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            long_subscription_cutoff = now + timedelta(days=365)
             users_result = await session.execute(
-                select(User.id, User.username, User.telegram_id).where(
+                select(User.id, User.username, User.telegram_id, User.expire_at).where(
                     User.username.in_(rwms_by_username.keys())
                 )
             )
-            users = [
-                (user_id, username, telegram_id)
-                for user_id, username, telegram_id in users_result.all()
-            ]
+            matched_rows = users_result.all()
+            users = []
+            skipped_long_subscriptions = 0
+            for user_id, username, telegram_id, expire_at in matched_rows:
+                if expire_at is not None and expire_at >= long_subscription_cutoff:
+                    skipped_long_subscriptions += 1
+                    continue
+                users.append((user_id, username, telegram_id))
+
             user_ids = [user_id for user_id, _, _ in users]
 
             snapshots_result = await session.execute(
@@ -98,7 +106,6 @@ class TrafficMonitor:
             suspicious = 0
             to_block = []
             anomaly_notifications: list[TrafficAnomalyNotification] = []
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
 
             for user_id, username, telegram_id in users:
                 rwms_user = rwms_by_username[username]
@@ -192,6 +199,7 @@ class TrafficMonitor:
             suspicious_users=suspicious,
             blocked_users=blocked,
             notifications_sent=notifications_sent,
+            skipped_long_subscriptions=skipped_long_subscriptions,
         )
 
     async def _get_all_rwms_users(self):

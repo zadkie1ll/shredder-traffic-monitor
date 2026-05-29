@@ -6,6 +6,8 @@ The service reads users from Remnawave, matches them with `common.models.db.User
 by username, and keeps one compact row per user in `user_traffic_anomalies`.
 By default it checks traffic every 10 minutes, marks a user suspicious at
 50 GiB delta, and can auto-block at 100 GiB delta when auto-blocking is enabled.
+Users whose `expire_at` is one year or more in the future are skipped, so
+long-term/lifetime subscriptions are not monitored or auto-blocked.
 
 Stored values:
 

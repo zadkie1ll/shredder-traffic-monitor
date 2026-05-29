@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -69,9 +70,21 @@ async def session_maker():
         await engine.dispose()
 
 
-async def add_user(session_maker, user_id: int = 1, username: str = "user-1") -> None:
+async def add_user(
+    session_maker,
+    user_id: int = 1,
+    username: str = "user-1",
+    expire_at: datetime | None = None,
+) -> None:
     async with session_maker() as session:
-        session.add(User(id=user_id, telegram_id=user_id, username=username))
+        session.add(
+            User(
+                id=user_id,
+                telegram_id=user_id,
+                username=username,
+                expire_at=expire_at,
+            )
+        )
         await session.commit()
 
 
@@ -179,6 +192,38 @@ async def test_unknown_bot_user_is_skipped(session_maker):
 
     assert result.total_rwms_users == 1
     assert result.matched_users == 0
+    async with session_maker() as session:
+        snapshots = (await session.execute(select(UserTrafficAnomaly))).scalars().all()
+    assert snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_user_with_year_or_longer_subscription_is_skipped(session_maker):
+    far_expire_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+        days=365,
+        hours=1,
+    )
+    await add_user(
+        session_maker,
+        user_id=9,
+        username="long-subscription",
+        expire_at=far_expire_at,
+    )
+    rwms = FakeRwmsClient(
+        [
+            FakeRwmsUser(
+                username="long-subscription",
+                lifetime_used_traffic_bytes=300,
+            )
+        ]
+    )
+    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+
+    result = await monitor.run_once()
+
+    assert result.total_rwms_users == 1
+    assert result.matched_users == 0
+    assert result.skipped_long_subscriptions == 1
     async with session_maker() as session:
         snapshots = (await session.execute(select(UserTrafficAnomaly))).scalars().all()
     assert snapshots == []
