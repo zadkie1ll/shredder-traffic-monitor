@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db import UserTrafficAnomaly
+from app.telegram_notifier import TrafficAnomalyNotification
 from common.models.db import User
 
 
@@ -20,6 +22,7 @@ class TrafficMonitorResult:
     updated_snapshots: int
     suspicious_users: int
     blocked_users: int
+    notifications_sent: int
 
 
 class TrafficMonitor:
@@ -30,6 +33,7 @@ class TrafficMonitor:
         anomaly_threshold_bytes: int,
         auto_block_enabled: bool = False,
         auto_block_threshold_bytes: int | None = None,
+        notifier=None,
     ) -> None:
         self._session_maker = session_maker
         self._rwms_client = rwms_client
@@ -40,6 +44,7 @@ class TrafficMonitor:
             if auto_block_threshold_bytes is not None
             else anomaly_threshold_bytes
         )
+        self._notifier = notifier
         self._log = logging.getLogger(self.__class__.__name__)
 
     async def run_forever(self, interval_seconds: int) -> None:
@@ -58,20 +63,25 @@ class TrafficMonitor:
         rwms_users = await self._get_all_rwms_users()
         if not rwms_users:
             self._log.warning("RWMS returned no users; skipping traffic check")
-            return TrafficMonitorResult(0, 0, 0, 0, 0, 0)
+            return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0)
 
         rwms_by_username = {
-            user.username: user for user in rwms_users if getattr(user, "username", "")
+            user.username: user
+            for user in rwms_users
+            if getattr(user, "username", "")
         }
 
         async with self._session_maker() as session:
             users_result = await session.execute(
-                select(User.id, User.username).where(
+                select(User.id, User.username, User.telegram_id).where(
                     User.username.in_(rwms_by_username.keys())
                 )
             )
-            users = [(user_id, username) for user_id, username in users_result.all()]
-            user_ids = [user_id for user_id, _ in users]
+            users = [
+                (user_id, username, telegram_id)
+                for user_id, username, telegram_id in users_result.all()
+            ]
+            user_ids = [user_id for user_id, _, _ in users]
 
             snapshots_result = await session.execute(
                 select(UserTrafficAnomaly).where(
@@ -87,9 +97,10 @@ class TrafficMonitor:
             updated = 0
             suspicious = 0
             to_block = []
+            anomaly_notifications: list[TrafficAnomalyNotification] = []
             now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-            for user_id, username in users:
+            for user_id, username, telegram_id in users:
                 rwms_user = rwms_by_username[username]
                 current_traffic = int(
                     getattr(rwms_user, "lifetime_used_traffic_bytes", 0) or 0
@@ -128,17 +139,40 @@ class TrafficMonitor:
 
                 if is_suspicious:
                     suspicious += 1
+                    anomaly_notifications.append(
+                        TrafficAnomalyNotification(
+                            username=username,
+                            user_id=user_id,
+                            telegram_id=telegram_id,
+                            previous_traffic_bytes=previous_traffic,
+                            current_traffic_bytes=current_traffic,
+                            delta_bytes=delta,
+                            anomaly_threshold_bytes=self._anomaly_threshold_bytes,
+                            should_block=should_block,
+                            blocked=bool(snapshot.is_blocked),
+                            detected_at=now,
+                        )
+                    )
                 if should_block and not snapshot.is_blocked:
-                    to_block.append((snapshot, rwms_user))
+                    notification_index = (
+                        len(anomaly_notifications) - 1 if is_suspicious else None
+                    )
+                    to_block.append((snapshot, rwms_user, notification_index))
 
                 updated += 1
 
             await session.commit()
 
         blocked = 0
-        for snapshot, rwms_user in to_block:
+        for snapshot, rwms_user, notification_index in to_block:
             if await self._rwms_client.disable_user(rwms_user):
                 blocked += 1
+                if notification_index is not None:
+                    notification = anomaly_notifications[notification_index]
+                    anomaly_notifications[notification_index] = replace(
+                        notification,
+                        blocked=True,
+                    )
                 async with self._session_maker() as session:
                     db_snapshot = await session.get(UserTrafficAnomaly, snapshot.id)
                     if db_snapshot is not None:
@@ -148,6 +182,8 @@ class TrafficMonitor:
                         )
                         await session.commit()
 
+        notifications_sent = await self._notify_anomalies(anomaly_notifications)
+
         return TrafficMonitorResult(
             total_rwms_users=len(rwms_users),
             matched_users=len(users),
@@ -155,6 +191,7 @@ class TrafficMonitor:
             updated_snapshots=updated,
             suspicious_users=suspicious,
             blocked_users=blocked,
+            notifications_sent=notifications_sent,
         )
 
     async def _get_all_rwms_users(self):
@@ -184,3 +221,16 @@ class TrafficMonitor:
             f"traffic delta {delta} bytes reached threshold "
             f"{self._anomaly_threshold_bytes} bytes"
         )
+
+    async def _notify_anomalies(
+        self,
+        anomalies: list[TrafficAnomalyNotification],
+    ) -> int:
+        if self._notifier is None or not anomalies:
+            return 0
+
+        try:
+            return await self._notifier.notify_traffic_anomalies(anomalies)
+        except Exception:
+            self._log.exception("failed to send traffic anomaly notifications")
+            return 0

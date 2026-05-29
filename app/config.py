@@ -31,6 +31,25 @@ def _get_bool(name: str, default: bool = False) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _get_int_list(*names: str) -> list[int]:
+    raw_values = [os.getenv(name, "") for name in names]
+    values = ",".join(value for value in raw_values if value)
+    if not values:
+        return []
+
+    result = []
+    for item in values.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            result.append(int(item))
+        except ValueError as exc:
+            raise ValueError(f"{names[0]} must contain integer Telegram ids") from exc
+
+    return result
+
+
 @dataclass(frozen=True)
 class Settings:
     log_level: str
@@ -46,6 +65,8 @@ class Settings:
     auto_block_enabled: bool
     auto_block_threshold_bytes: int
     create_schema: bool
+    telegram_bot_token: str | None
+    telegram_notify_chat_ids: list[int]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -99,6 +120,14 @@ class Settings:
                 100 * GIB,
             ),
             create_schema=_get_bool("TRAFFIC_MONITOR_CREATE_SCHEMA"),
+            telegram_bot_token=_get_str(
+                "TRAFFIC_MONITOR_TELEGRAM_BOT_TOKEN",
+                _get_str("MI_VPN_BOT_TOKEN"),
+            ),
+            telegram_notify_chat_ids=_get_int_list(
+                "TRAFFIC_MONITOR_TELEGRAM_NOTIFY_CHAT_IDS",
+                "TRAFFIC_MONITOR_TELEGRAM_NOTIFY_CHAT_ID",
+            ),
         )
 
     @property

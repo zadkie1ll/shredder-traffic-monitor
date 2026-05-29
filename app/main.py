@@ -9,6 +9,7 @@ from app.config import Settings
 from app.db import create_monitor_schema
 from app.monitor import TrafficMonitor
 from app.rwms import RwmsClient
+from app.telegram_notifier import TelegramNotifier
 
 
 def configure_logging(level: str) -> None:
@@ -30,6 +31,12 @@ async def run(settings: Settings) -> None:
     )
     session_maker = async_sessionmaker(bind=engine, expire_on_commit=False)
     rwms_client = RwmsClient(addr=settings.rwms_address, port=settings.rwms_port)
+    notifier = None
+    if settings.telegram_bot_token and settings.telegram_notify_chat_ids:
+        notifier = TelegramNotifier(
+            bot_token=settings.telegram_bot_token,
+            chat_ids=settings.telegram_notify_chat_ids,
+        )
 
     try:
         if settings.create_schema:
@@ -41,12 +48,15 @@ async def run(settings: Settings) -> None:
             anomaly_threshold_bytes=settings.anomaly_threshold_bytes,
             auto_block_enabled=settings.auto_block_enabled,
             auto_block_threshold_bytes=settings.auto_block_threshold_bytes,
+            notifier=notifier,
         )
         logging.getLogger("startup").info(
-            "started traffic monitor: interval=%ss anomaly_threshold=%s auto_block=%s",
+            "started traffic monitor: interval=%ss anomaly_threshold=%s "
+            "auto_block=%s telegram_notifications=%s",
             settings.interval_seconds,
             settings.anomaly_threshold_bytes,
             settings.auto_block_enabled,
+            notifier is not None,
         )
         await monitor.run_forever(settings.interval_seconds)
     finally:

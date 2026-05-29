@@ -45,6 +45,15 @@ class FakeRwmsClient:
         return True
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.anomalies = []
+
+    async def notify_traffic_anomalies(self, anomalies):
+        self.anomalies.extend(anomalies)
+        return len(anomalies)
+
+
 @pytest.fixture()
 async def session_maker():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -132,6 +141,31 @@ async def test_auto_block_disables_anomalous_user_once(session_maker):
     assert result.blocked_users == 1
     assert rwms.disabled == ["user-1"]
     assert snapshot.is_blocked is True
+
+
+@pytest.mark.asyncio
+async def test_suspicious_user_sends_admin_notification(session_maker):
+    await add_user(session_maker, user_id=7, username="user-7")
+    rwms = FakeRwmsClient(
+        [FakeRwmsUser(username="user-7", lifetime_used_traffic_bytes=100)]
+    )
+    notifier = FakeNotifier()
+    monitor = TrafficMonitor(
+        session_maker,
+        rwms,
+        anomaly_threshold_bytes=200,
+        notifier=notifier,
+    )
+    await monitor.run_once()
+
+    rwms.users = [FakeRwmsUser(username="user-7", lifetime_used_traffic_bytes=350)]
+    result = await monitor.run_once()
+
+    assert result.notifications_sent == 1
+    assert len(notifier.anomalies) == 1
+    assert notifier.anomalies[0].username == "user-7"
+    assert notifier.anomalies[0].telegram_id == 7
+    assert notifier.anomalies[0].delta_bytes == 250
 
 
 @pytest.mark.asyncio
