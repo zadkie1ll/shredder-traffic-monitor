@@ -58,10 +58,7 @@ async def run(settings: Settings) -> None:
             settings.auto_block_enabled,
             notifier is not None,
         )
-        tasks = [monitor.run_forever(settings.interval_seconds)]
-        if notifier is not None:
-            tasks.append(notifier.run_action_handler(session_maker, rwms_client))
-        await asyncio.gather(*tasks)
+        await monitor.run_forever(settings.interval_seconds)
     finally:
         await rwms_client.close()
         await engine.dispose()

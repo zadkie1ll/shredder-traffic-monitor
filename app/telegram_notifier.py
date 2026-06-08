@@ -9,13 +9,6 @@ from html import escape
 from urllib import request
 from urllib.error import HTTPError, URLError
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
-from app.db import UserTrafficAnomaly
-from common.models.db import User
-
-
 BLOCK_CALLBACK_PREFIX = "block_user:"
 
 
@@ -44,7 +37,6 @@ class TelegramNotifier:
         self._chat_ids = chat_ids
         self._timeout_seconds = timeout_seconds
         self._log = logging.getLogger(self.__class__.__name__)
-        self._update_offset = 0
 
     async def notify_traffic_anomalies(
         self,
@@ -104,155 +96,6 @@ class TelegramNotifier:
             }
 
         return self._telegram_request("sendMessage", payload) is not None
-
-    async def run_action_handler(
-        self,
-        session_maker: async_sessionmaker,
-        rwms_client,
-    ) -> None:
-        while True:
-            try:
-                updates = await asyncio.to_thread(self._get_updates_sync)
-                if updates is None:
-                    await asyncio.sleep(3)
-                    continue
-                for update in updates:
-                    await self._handle_update(update, session_maker, rwms_client)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self._log.exception("telegram action handler failed")
-                await asyncio.sleep(3)
-
-    def _get_updates_sync(self) -> list[dict] | None:
-        result = self._telegram_request(
-            "getUpdates",
-            {
-                "offset": self._update_offset,
-                "timeout": 30,
-                "allowed_updates": ["callback_query"],
-            },
-            timeout_seconds=35,
-        )
-        if not isinstance(result, list):
-            return None
-
-        if result:
-            self._update_offset = max(update["update_id"] for update in result) + 1
-        return result
-
-    async def _handle_update(
-        self,
-        update: dict,
-        session_maker: async_sessionmaker,
-        rwms_client,
-    ) -> None:
-        callback = update.get("callback_query")
-        if not isinstance(callback, dict):
-            return
-
-        callback_id = callback.get("id")
-        data = callback.get("data", "")
-        message = callback.get("message") or {}
-        chat_id = (message.get("chat") or {}).get("id")
-        if chat_id not in self._chat_ids:
-            await self._answer_callback(
-                callback_id,
-                "Недостаточно прав",
-                show_alert=True,
-            )
-            return
-
-        if not data.startswith(BLOCK_CALLBACK_PREFIX):
-            await self._answer_callback(callback_id, "Неизвестное действие")
-            return
-
-        try:
-            user_id = int(data.removeprefix(BLOCK_CALLBACK_PREFIX))
-        except ValueError:
-            await self._answer_callback(callback_id, "Некорректный пользователь")
-            return
-
-        async with session_maker() as session:
-            user = await session.get(User, user_id)
-            if user is None or not user.username:
-                await self._answer_callback(
-                    callback_id,
-                    "Пользователь не найден",
-                    show_alert=True,
-                )
-                return
-
-            rwms_user = await rwms_client.get_user_by_username(user.username)
-            if rwms_user is None:
-                await self._answer_callback(
-                    callback_id,
-                    "Пользователь не найден в RWMS",
-                    show_alert=True,
-                )
-                return
-
-            if not await rwms_client.disable_user(rwms_user):
-                await self._answer_callback(
-                    callback_id,
-                    "Не удалось заблокировать пользователя",
-                    show_alert=True,
-                )
-                return
-
-            snapshot = await session.scalar(
-                select(UserTrafficAnomaly).where(
-                    UserTrafficAnomaly.user_id == user_id
-                )
-            )
-            if snapshot is not None:
-                snapshot.is_blocked = True
-                await session.commit()
-
-        await self._answer_callback(callback_id, "Пользователь заблокирован")
-        await asyncio.to_thread(
-            self._edit_message_markup_sync,
-            chat_id,
-            message.get("message_id"),
-        )
-
-    async def _answer_callback(
-        self,
-        callback_id: str | None,
-        text: str,
-        show_alert: bool = False,
-    ) -> None:
-        if not callback_id:
-            return
-        await asyncio.to_thread(
-            self._telegram_request,
-            "answerCallbackQuery",
-            {
-                "callback_query_id": callback_id,
-                "text": text,
-                "show_alert": show_alert,
-            },
-        )
-
-    def _edit_message_markup_sync(
-        self,
-        chat_id: int,
-        message_id: int | None,
-    ) -> None:
-        if message_id is None:
-            return
-        self._telegram_request(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "reply_markup": {
-                    "inline_keyboard": [
-                        [{"text": "Пользователь заблокирован", "callback_data": "done"}]
-                    ]
-                },
-            },
-        )
 
     def _telegram_request(
         self,

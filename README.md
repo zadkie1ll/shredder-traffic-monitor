@@ -40,8 +40,8 @@ TRAFFIC_MONITOR_TELEGRAM_NOTIFY_CHAT_ID=123456789
 You can also set `TRAFFIC_MONITOR_TELEGRAM_NOTIFY_CHAT_IDS` as a comma-separated
 list, or override the token with `TRAFFIC_MONITOR_TELEGRAM_BOT_TOKEN`.
 Each anomaly alert includes an admin-only button that disables the user in
-RWMS. The monitor must be the only process receiving Telegram updates for this
-bot token; Telegram does not support multiple concurrent `getUpdates` consumers.
+RWMS. The `block_user:` callback is handled by `shredder-vpn-bot`, which already
+owns Telegram polling for the shared bot token.
 
 Schema is described and migrated in the `common` submodule. For a first
 bootstrap run you can also set `TRAFFIC_MONITOR_CREATE_SCHEMA=true`.
