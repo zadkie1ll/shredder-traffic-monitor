@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.monitor import TrafficMonitor
+from app.telegram_notifier import TelegramNotifier
 from common.models.db import Base, User, UserTrafficAnomaly
 
 
@@ -45,6 +46,9 @@ class FakeRwmsClient:
         self.disabled.append(user.username)
         return True
 
+    async def get_user_by_username(self, username: str):
+        return next((user for user in self.users if user.username == username), None)
+
 
 class FakeNotifier:
     def __init__(self) -> None:
@@ -53,6 +57,16 @@ class FakeNotifier:
     async def notify_traffic_anomalies(self, anomalies):
         self.anomalies.extend(anomalies)
         return len(anomalies)
+
+
+class RecordingTelegramNotifier(TelegramNotifier):
+    def __init__(self) -> None:
+        super().__init__(bot_token="token", chat_ids=[123])
+        self.requests = []
+
+    def _telegram_request(self, method, payload, timeout_seconds=None):
+        self.requests.append((method, payload))
+        return True
 
 
 @pytest.fixture()
@@ -227,3 +241,56 @@ async def test_user_with_year_or_longer_subscription_is_skipped(session_maker):
     async with session_maker() as session:
         snapshots = (await session.execute(select(UserTrafficAnomaly))).scalars().all()
     assert snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_alert_has_block_user_button():
+    notifier = RecordingTelegramNotifier()
+
+    sent = await notifier.send_message(chat_id=123, text="alert", user_id=7)
+
+    assert sent is True
+    method, payload = notifier.requests[0]
+    assert method == "sendMessage"
+    assert payload["reply_markup"]["inline_keyboard"][0][0] == {
+        "text": "Заблокировать пользователя",
+        "callback_data": "block_user:7",
+    }
+
+
+@pytest.mark.asyncio
+async def test_block_button_disables_user_and_updates_snapshot(session_maker):
+    await add_user(session_maker, user_id=7, username="user-7")
+    rwms = FakeRwmsClient(
+        [FakeRwmsUser(username="user-7", lifetime_used_traffic_bytes=100)]
+    )
+    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+    await monitor.run_once()
+    notifier = RecordingTelegramNotifier()
+
+    await notifier._handle_update(
+        {
+            "callback_query": {
+                "id": "callback-1",
+                "data": "block_user:7",
+                "message": {
+                    "message_id": 55,
+                    "chat": {"id": 123},
+                },
+            }
+        },
+        session_maker,
+        rwms,
+    )
+
+    async with session_maker() as session:
+        snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
+
+    assert rwms.disabled == ["user-7"]
+    assert snapshot.is_blocked is True
+    assert ("answerCallbackQuery", {
+        "callback_query_id": "callback-1",
+        "text": "Пользователь заблокирован",
+        "show_alert": False,
+    }) in notifier.requests
+    assert any(method == "editMessageReplyMarkup" for method, _ in notifier.requests)
