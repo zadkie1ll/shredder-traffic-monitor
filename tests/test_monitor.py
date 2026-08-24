@@ -244,7 +244,7 @@ async def test_rwms_users_are_processed_by_pages(session_maker):
 
 
 @pytest.mark.asyncio
-async def test_user_with_year_or_longer_subscription_is_skipped(session_maker):
+async def test_user_with_year_or_longer_subscription_is_alert_only(session_maker):
     far_expire_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
         days=365,
         hours=1,
@@ -263,16 +263,37 @@ async def test_user_with_year_or_longer_subscription_is_skipped(session_maker):
             )
         ]
     )
-    monitor = TrafficMonitor(session_maker, rwms, alert_speed_mbps=50)
+    notifier = FakeNotifier()
+    monitor = TrafficMonitor(
+        session_maker,
+        rwms,
+        alert_speed_mbps=1,
+        auto_block_enabled=True,
+        auto_block_speed_mbps=1,
+        notifier=notifier,
+    )
 
+    await monitor.run_once()
+    rwms.users = [
+        FakeRwmsUser(
+            username="long-subscription",
+            lifetime_used_traffic_bytes=250_000_300,
+        )
+    ]
     result = await monitor.run_once()
 
     assert result.total_rwms_users == 1
-    assert result.matched_users == 0
-    assert result.skipped_long_subscriptions == 1
+    assert result.matched_users == 1
+    assert result.suspicious_users == 1
+    assert result.blocked_users == 0
+    assert result.notifications_sent == 1
+    assert result.long_subscription_alert_only_users == 1
+    assert rwms.disabled == []
+    assert notifier.anomalies[0].should_block is False
     async with session_maker() as session:
-        snapshots = (await session.execute(select(UserTrafficAnomaly))).scalars().all()
-    assert snapshots == []
+        snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
+    assert snapshot.is_suspicious is True
+    assert snapshot.is_blocked is False
 
 
 @pytest.mark.asyncio

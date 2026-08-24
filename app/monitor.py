@@ -23,7 +23,7 @@ class TrafficMonitorResult:
     suspicious_users: int
     blocked_users: int
     notifications_sent: int
-    skipped_long_subscriptions: int
+    long_subscription_alert_only_users: int
 
 
 class TrafficMonitor:
@@ -114,9 +114,9 @@ class TrafficMonitor:
                 notifications_sent=(
                     result.notifications_sent + page_result.notifications_sent
                 ),
-                skipped_long_subscriptions=(
-                    result.skipped_long_subscriptions
-                    + page_result.skipped_long_subscriptions
+                long_subscription_alert_only_users=(
+                    result.long_subscription_alert_only_users
+                    + page_result.long_subscription_alert_only_users
                 ),
             )
 
@@ -151,14 +151,16 @@ class TrafficMonitor:
             )
             matched_rows = users_result.all()
             users = []
-            skipped_long_subscriptions = 0
+            long_subscription_alert_only_users = 0
             for user_id, username, telegram_id, expire_at in matched_rows:
-                if expire_at is not None and expire_at >= long_subscription_cutoff:
-                    skipped_long_subscriptions += 1
-                    continue
-                users.append((user_id, username, telegram_id))
+                is_long_subscription = (
+                    expire_at is not None and expire_at >= long_subscription_cutoff
+                )
+                if is_long_subscription:
+                    long_subscription_alert_only_users += 1
+                users.append((user_id, username, telegram_id, is_long_subscription))
 
-            user_ids = [user_id for user_id, _, _ in users]
+            user_ids = [user_id for user_id, _, _, _ in users]
             if not user_ids:
                 return TrafficMonitorResult(
                     total_rwms_users=0,
@@ -168,7 +170,9 @@ class TrafficMonitor:
                     suspicious_users=0,
                     blocked_users=0,
                     notifications_sent=0,
-                    skipped_long_subscriptions=skipped_long_subscriptions,
+                    long_subscription_alert_only_users=(
+                        long_subscription_alert_only_users
+                    ),
                 )
 
             snapshots_result = await session.execute(
@@ -187,7 +191,7 @@ class TrafficMonitor:
             to_block = []
             anomaly_notifications: list[TrafficAnomalyNotification] = []
 
-            for user_id, username, telegram_id in users:
+            for user_id, username, telegram_id, is_long_subscription in users:
                 rwms_user = rwms_by_username[username]
                 current_traffic = int(
                     getattr(rwms_user, "lifetime_used_traffic_bytes", 0) or 0
@@ -217,6 +221,7 @@ class TrafficMonitor:
                 is_suspicious = average_speed_mbps >= self._alert_speed_mbps
                 should_block = (
                     self._auto_block_enabled
+                    and not is_long_subscription
                     and average_speed_mbps >= self._auto_block_speed_mbps
                 )
 
@@ -292,7 +297,7 @@ class TrafficMonitor:
             suspicious_users=suspicious,
             blocked_users=blocked,
             notifications_sent=notifications_sent,
-            skipped_long_subscriptions=skipped_long_subscriptions,
+            long_subscription_alert_only_users=long_subscription_alert_only_users,
         )
 
     @staticmethod
