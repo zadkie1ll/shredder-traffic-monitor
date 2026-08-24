@@ -150,12 +150,14 @@ async def test_auto_block_disables_anomalous_user_once(session_maker):
     rwms = FakeRwmsClient(
         [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100)]
     )
+    notifier = FakeNotifier()
     monitor = TrafficMonitor(
         session_maker,
         rwms,
         alert_speed_mbps=1,
         auto_block_enabled=True,
         auto_block_speed_mbps=1,
+        notifier=notifier,
     )
     await monitor.run_once()
 
@@ -167,9 +169,98 @@ async def test_auto_block_disables_anomalous_user_once(session_maker):
     async with session_maker() as session:
         snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
 
+    assert result.blocked_users == 0
+    assert rwms.disabled == []
+    assert snapshot.auto_block_strikes == 1
+    assert snapshot.is_blocked is False
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=400_000_100)
+    ]
+    result = await monitor.run_once()
+
+    async with session_maker() as session:
+        snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
+
     assert result.blocked_users == 1
     assert rwms.disabled == ["user-1"]
+    assert notifier.anomalies[-1].should_block is True
+    assert notifier.anomalies[-1].blocked is True
+    assert snapshot.auto_block_strikes == 2
     assert snapshot.is_blocked is True
+
+
+@pytest.mark.asyncio
+async def test_auto_block_strikes_reset_when_speed_drops(session_maker):
+    await add_user(session_maker)
+    rwms = FakeRwmsClient(
+        [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100)]
+    )
+    monitor = TrafficMonitor(
+        session_maker,
+        rwms,
+        alert_speed_mbps=1,
+        auto_block_enabled=True,
+        auto_block_speed_mbps=1,
+        auto_block_required_strikes=2,
+    )
+    await monitor.run_once()
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=200_000_100)
+    ]
+    await monitor.run_once()
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=200_000_101)
+    ]
+    await monitor.run_once()
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=400_000_101)
+    ]
+    result = await monitor.run_once()
+
+    async with session_maker() as session:
+        snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
+
+    assert result.blocked_users == 0
+    assert rwms.disabled == []
+    assert snapshot.auto_block_strikes == 1
+    assert snapshot.is_blocked is False
+
+
+@pytest.mark.asyncio
+async def test_blocked_user_does_not_send_repeated_notifications(session_maker):
+    await add_user(session_maker)
+    rwms = FakeRwmsClient(
+        [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100)]
+    )
+    notifier = FakeNotifier()
+    monitor = TrafficMonitor(
+        session_maker,
+        rwms,
+        alert_speed_mbps=1,
+        auto_block_enabled=True,
+        auto_block_speed_mbps=1,
+        auto_block_required_strikes=1,
+        notifier=notifier,
+    )
+    await monitor.run_once()
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=200_000_100)
+    ]
+    await monitor.run_once()
+
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=400_000_100)
+    ]
+    result = await monitor.run_once()
+
+    assert result.notifications_sent == 0
+    assert len(notifier.anomalies) == 1
+    assert rwms.disabled == ["user-1"]
 
 
 @pytest.mark.asyncio
@@ -244,7 +335,7 @@ async def test_rwms_users_are_processed_by_pages(session_maker):
 
 
 @pytest.mark.asyncio
-async def test_user_with_year_or_longer_subscription_is_alert_only(session_maker):
+async def test_user_with_year_or_longer_subscription_can_be_auto_blocked(session_maker):
     far_expire_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
         days=365,
         hours=1,
@@ -270,6 +361,7 @@ async def test_user_with_year_or_longer_subscription_is_alert_only(session_maker
         alert_speed_mbps=1,
         auto_block_enabled=True,
         auto_block_speed_mbps=1,
+        auto_block_required_strikes=1,
         notifier=notifier,
     )
 
@@ -285,15 +377,16 @@ async def test_user_with_year_or_longer_subscription_is_alert_only(session_maker
     assert result.total_rwms_users == 1
     assert result.matched_users == 1
     assert result.suspicious_users == 1
-    assert result.blocked_users == 0
+    assert result.blocked_users == 1
     assert result.notifications_sent == 1
-    assert result.long_subscription_alert_only_users == 1
-    assert rwms.disabled == []
-    assert notifier.anomalies[0].should_block is False
+    assert result.long_subscription_users == 1
+    assert rwms.disabled == ["long-subscription"]
+    assert notifier.anomalies[0].should_block is True
+    assert notifier.anomalies[0].blocked is True
     async with session_maker() as session:
         snapshot = (await session.execute(select(UserTrafficAnomaly))).scalar_one()
     assert snapshot.is_suspicious is True
-    assert snapshot.is_blocked is False
+    assert snapshot.is_blocked is True
 
 
 @pytest.mark.asyncio

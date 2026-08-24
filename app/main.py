@@ -48,17 +48,19 @@ async def run(settings: Settings) -> None:
             alert_speed_mbps=settings.alert_speed_mbps,
             auto_block_enabled=settings.auto_block_enabled,
             auto_block_speed_mbps=settings.auto_block_speed_mbps,
+            auto_block_required_strikes=settings.auto_block_required_strikes,
             rwms_page_size=settings.rwms_page_size,
             notifier=notifier,
         )
         logging.getLogger("startup").info(
             "started traffic monitor: interval=%ss alert_speed=%sMbps "
-            "auto_block=%s auto_block_speed=%sMbps rwms_page_size=%s "
-            "telegram_notifications=%s",
+            "auto_block=%s auto_block_speed=%sMbps auto_block_required_strikes=%s "
+            "rwms_page_size=%s telegram_notifications=%s",
             settings.interval_seconds,
             settings.alert_speed_mbps,
             settings.auto_block_enabled,
             settings.auto_block_speed_mbps,
+            settings.auto_block_required_strikes,
             settings.rwms_page_size,
             notifier is not None,
         )

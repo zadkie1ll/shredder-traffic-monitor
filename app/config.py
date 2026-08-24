@@ -61,6 +61,7 @@ class Settings:
     alert_speed_mbps: int
     auto_block_enabled: bool
     auto_block_speed_mbps: int
+    auto_block_required_strikes: int
     create_schema: bool
     telegram_bot_token: str | None
     telegram_notify_chat_ids: list[int]
@@ -113,6 +114,10 @@ class Settings:
             auto_block_speed_mbps=_get_int(
                 "TRAFFIC_MONITOR_AUTO_BLOCK_SPEED_MBPS",
                 200,
+            ),
+            auto_block_required_strikes=_get_int(
+                "TRAFFIC_MONITOR_AUTO_BLOCK_REQUIRED_STRIKES",
+                2,
             ),
             create_schema=_get_bool("TRAFFIC_MONITOR_CREATE_SCHEMA"),
             telegram_bot_token=_get_str(

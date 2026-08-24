@@ -23,7 +23,7 @@ class TrafficMonitorResult:
     suspicious_users: int
     blocked_users: int
     notifications_sent: int
-    long_subscription_alert_only_users: int
+    long_subscription_users: int
 
 
 class TrafficMonitor:
@@ -31,9 +31,10 @@ class TrafficMonitor:
         self,
         session_maker: async_sessionmaker,
         rwms_client,
-        alert_speed_mbps: int = 50,
+        alert_speed_mbps: int = 100,
         auto_block_enabled: bool = False,
-        auto_block_speed_mbps: int = 100,
+        auto_block_speed_mbps: int = 200,
+        auto_block_required_strikes: int = 2,
         rwms_page_size: int = 500,
         notifier=None,
     ) -> None:
@@ -42,6 +43,7 @@ class TrafficMonitor:
         self._alert_speed_mbps = alert_speed_mbps
         self._auto_block_enabled = auto_block_enabled
         self._auto_block_speed_mbps = auto_block_speed_mbps
+        self._auto_block_required_strikes = max(1, auto_block_required_strikes)
         self._rwms_page_size = max(1, rwms_page_size)
         self._notifier = notifier
         self._log = logging.getLogger(self.__class__.__name__)
@@ -114,9 +116,9 @@ class TrafficMonitor:
                 notifications_sent=(
                     result.notifications_sent + page_result.notifications_sent
                 ),
-                long_subscription_alert_only_users=(
-                    result.long_subscription_alert_only_users
-                    + page_result.long_subscription_alert_only_users
+                long_subscription_users=(
+                    result.long_subscription_users
+                    + page_result.long_subscription_users
                 ),
             )
 
@@ -151,13 +153,13 @@ class TrafficMonitor:
             )
             matched_rows = users_result.all()
             users = []
-            long_subscription_alert_only_users = 0
+            long_subscription_users = 0
             for user_id, username, telegram_id, expire_at in matched_rows:
                 is_long_subscription = (
                     expire_at is not None and expire_at >= long_subscription_cutoff
                 )
                 if is_long_subscription:
-                    long_subscription_alert_only_users += 1
+                    long_subscription_users += 1
                 users.append((user_id, username, telegram_id, is_long_subscription))
 
             user_ids = [user_id for user_id, _, _, _ in users]
@@ -170,8 +172,8 @@ class TrafficMonitor:
                     suspicious_users=0,
                     blocked_users=0,
                     notifications_sent=0,
-                    long_subscription_alert_only_users=(
-                        long_subscription_alert_only_users
+                    long_subscription_users=(
+                        long_subscription_users
                     ),
                 )
 
@@ -219,29 +221,34 @@ class TrafficMonitor:
                     elapsed_seconds,
                 )
                 is_suspicious = average_speed_mbps >= self._alert_speed_mbps
+                exceeds_auto_block_speed = (
+                    average_speed_mbps >= self._auto_block_speed_mbps
+                )
+                current_strikes = int(snapshot.auto_block_strikes or 0)
+                auto_block_strikes = (
+                    current_strikes + 1 if exceeds_auto_block_speed else 0
+                )
                 should_block = (
                     self._auto_block_enabled
-                    and not is_long_subscription
-                    and average_speed_mbps >= self._auto_block_speed_mbps
+                    and auto_block_strikes >= self._auto_block_required_strikes
                 )
 
                 snapshot.username = username
                 snapshot.last_lifetime_used_traffic_bytes = current_traffic
                 snapshot.last_traffic_delta_bytes = delta
+                snapshot.auto_block_strikes = auto_block_strikes
                 snapshot.is_suspicious = is_suspicious
-                snapshot.suspicious_reason = (
-                    self._build_reason(
-                        delta=delta,
-                        elapsed_seconds=elapsed_seconds,
-                        average_speed_mbps=average_speed_mbps,
-                    )
-                    if is_suspicious
-                    else None
+                suspicious_reason = self._build_reason(
+                    delta=delta,
+                    elapsed_seconds=elapsed_seconds,
+                    average_speed_mbps=average_speed_mbps,
+                    auto_block_strikes=auto_block_strikes,
                 )
+                snapshot.suspicious_reason = suspicious_reason if is_suspicious else None
                 snapshot.detected_at = now if is_suspicious else None
                 snapshot.updated_at = now
 
-                if is_suspicious:
+                if is_suspicious and not snapshot.is_blocked:
                     suspicious += 1
                     anomaly_notifications.append(
                         TrafficAnomalyNotification(
@@ -253,6 +260,7 @@ class TrafficMonitor:
                             delta_bytes=delta,
                             average_speed_mbps=average_speed_mbps,
                             speed_threshold_mbps=self._alert_speed_mbps,
+                            reason=suspicious_reason,
                             should_block=should_block,
                             blocked=bool(snapshot.is_blocked),
                             detected_at=now,
@@ -297,7 +305,7 @@ class TrafficMonitor:
             suspicious_users=suspicious,
             blocked_users=blocked,
             notifications_sent=notifications_sent,
-            long_subscription_alert_only_users=long_subscription_alert_only_users,
+            long_subscription_users=long_subscription_users,
         )
 
     @staticmethod
@@ -309,11 +317,14 @@ class TrafficMonitor:
         delta: int,
         elapsed_seconds: float,
         average_speed_mbps: float,
+        auto_block_strikes: int,
     ) -> str:
         return (
             f"average speed {average_speed_mbps:.2f} Mbps over "
             f"{elapsed_seconds:.0f}s reached threshold "
-            f"{self._alert_speed_mbps} Mbps; delta={delta} bytes"
+            f"{self._alert_speed_mbps} Mbps; delta={delta} bytes; "
+            f"auto_block_strikes={auto_block_strikes}/"
+            f"{self._auto_block_required_strikes}"
         )
 
     async def _notify_anomalies(

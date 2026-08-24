@@ -22,6 +22,7 @@ class TrafficAnomalyNotification:
     delta_bytes: int
     average_speed_mbps: float
     speed_threshold_mbps: int
+    reason: str
     should_block: bool
     blocked: bool = False
     detected_at: datetime | None = None
@@ -150,6 +151,7 @@ class TelegramNotifier:
                 f"Delta: <b>{_format_bytes(anomaly.delta_bytes)}</b>",
                 f"Previous: {_format_bytes(anomaly.previous_traffic_bytes)}",
                 f"Current: {_format_bytes(anomaly.current_traffic_bytes)}",
+                f"Reason: <code>{escape(anomaly.reason)}</code>",
                 f"Status: <b>{status}</b>",
             ]
         )
