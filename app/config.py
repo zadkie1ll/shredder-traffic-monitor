@@ -108,11 +108,11 @@ class Settings:
             pg_user=pg_user or "",
             pg_password=pg_password or "",
             pg_db=pg_db or "",
-            alert_speed_mbps=_get_int("TRAFFIC_MONITOR_ALERT_SPEED_MBPS", 50),
+            alert_speed_mbps=_get_int("TRAFFIC_MONITOR_ALERT_SPEED_MBPS", 100),
             auto_block_enabled=_get_bool("TRAFFIC_MONITOR_AUTO_BLOCK_ENABLED"),
             auto_block_speed_mbps=_get_int(
                 "TRAFFIC_MONITOR_AUTO_BLOCK_SPEED_MBPS",
-                100,
+                200,
             ),
             create_schema=_get_bool("TRAFFIC_MONITOR_CREATE_SCHEMA"),
             telegram_bot_token=_get_str(
