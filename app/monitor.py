@@ -31,20 +31,18 @@ class TrafficMonitor:
         self,
         session_maker: async_sessionmaker,
         rwms_client,
-        anomaly_threshold_bytes: int,
+        alert_speed_mbps: int = 50,
         auto_block_enabled: bool = False,
-        auto_block_threshold_bytes: int | None = None,
+        auto_block_speed_mbps: int = 100,
+        rwms_page_size: int = 500,
         notifier=None,
     ) -> None:
         self._session_maker = session_maker
         self._rwms_client = rwms_client
-        self._anomaly_threshold_bytes = anomaly_threshold_bytes
+        self._alert_speed_mbps = alert_speed_mbps
         self._auto_block_enabled = auto_block_enabled
-        self._auto_block_threshold_bytes = (
-            auto_block_threshold_bytes
-            if auto_block_threshold_bytes is not None
-            else anomaly_threshold_bytes
-        )
+        self._auto_block_speed_mbps = auto_block_speed_mbps
+        self._rwms_page_size = max(1, rwms_page_size)
         self._notifier = notifier
         self._log = logging.getLogger(self.__class__.__name__)
 
@@ -61,9 +59,78 @@ class TrafficMonitor:
             await asyncio.sleep(interval_seconds)
 
     async def run_once(self) -> TrafficMonitorResult:
-        rwms_users = await self._get_all_rwms_users()
+        result = TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0, 0)
+        offset = 0
+        saw_any_page = False
+
+        while True:
+            response = await self._rwms_client.get_all_users(
+                offset=offset,
+                count=self._rwms_page_size,
+            )
+            if response is None:
+                if not saw_any_page:
+                    self._log.warning("RWMS returned no users; skipping traffic check")
+                else:
+                    self._log.warning(
+                        "RWMS returned no users page at offset=%s; "
+                        "traffic check stopped after a partial pass",
+                        offset,
+                    )
+                break
+
+            rwms_users = list(response.users)
+            fetched = len(rwms_users)
+            total = int(getattr(response, "total", 0) or 0)
+            if total > 0:
+                result = replace(
+                    result,
+                    total_rwms_users=max(result.total_rwms_users, total),
+                )
+            else:
+                result = replace(
+                    result,
+                    total_rwms_users=result.total_rwms_users + fetched,
+                )
+
+            if fetched == 0:
+                break
+
+            saw_any_page = True
+            page_result = await self._process_rwms_users_page(rwms_users)
+            result = TrafficMonitorResult(
+                total_rwms_users=result.total_rwms_users,
+                matched_users=result.matched_users + page_result.matched_users,
+                created_snapshots=(
+                    result.created_snapshots + page_result.created_snapshots
+                ),
+                updated_snapshots=(
+                    result.updated_snapshots + page_result.updated_snapshots
+                ),
+                suspicious_users=(
+                    result.suspicious_users + page_result.suspicious_users
+                ),
+                blocked_users=result.blocked_users + page_result.blocked_users,
+                notifications_sent=(
+                    result.notifications_sent + page_result.notifications_sent
+                ),
+                skipped_long_subscriptions=(
+                    result.skipped_long_subscriptions
+                    + page_result.skipped_long_subscriptions
+                ),
+            )
+
+            offset += fetched
+            if total > 0 and offset >= total:
+                break
+
+        if not saw_any_page:
+            return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0, 0)
+
+        return result
+
+    async def _process_rwms_users_page(self, rwms_users) -> TrafficMonitorResult:
         if not rwms_users:
-            self._log.warning("RWMS returned no users; skipping traffic check")
             return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0, 0)
 
         rwms_by_username = {
@@ -71,6 +138,8 @@ class TrafficMonitor:
             for user in rwms_users
             if getattr(user, "username", "")
         }
+        if not rwms_by_username:
+            return TrafficMonitorResult(0, 0, 0, 0, 0, 0, 0, 0)
 
         async with self._session_maker() as session:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -90,6 +159,17 @@ class TrafficMonitor:
                 users.append((user_id, username, telegram_id))
 
             user_ids = [user_id for user_id, _, _ in users]
+            if not user_ids:
+                return TrafficMonitorResult(
+                    total_rwms_users=0,
+                    matched_users=0,
+                    created_snapshots=0,
+                    updated_snapshots=0,
+                    suspicious_users=0,
+                    blocked_users=0,
+                    notifications_sent=0,
+                    skipped_long_subscriptions=skipped_long_subscriptions,
+                )
 
             snapshots_result = await session.execute(
                 select(UserTrafficAnomaly).where(
@@ -128,10 +208,16 @@ class TrafficMonitor:
 
                 previous_traffic = int(snapshot.last_lifetime_used_traffic_bytes or 0)
                 delta = max(current_traffic - previous_traffic, 0)
-                is_suspicious = delta >= self._anomaly_threshold_bytes
+                previous_checked_at = snapshot.updated_at or snapshot.created_at or now
+                elapsed_seconds = max((now - previous_checked_at).total_seconds(), 1)
+                average_speed_mbps = self._calculate_speed_mbps(
+                    delta,
+                    elapsed_seconds,
+                )
+                is_suspicious = average_speed_mbps >= self._alert_speed_mbps
                 should_block = (
                     self._auto_block_enabled
-                    and delta >= self._auto_block_threshold_bytes
+                    and average_speed_mbps >= self._auto_block_speed_mbps
                 )
 
                 snapshot.username = username
@@ -139,7 +225,13 @@ class TrafficMonitor:
                 snapshot.last_traffic_delta_bytes = delta
                 snapshot.is_suspicious = is_suspicious
                 snapshot.suspicious_reason = (
-                    self._build_reason(delta) if is_suspicious else None
+                    self._build_reason(
+                        delta=delta,
+                        elapsed_seconds=elapsed_seconds,
+                        average_speed_mbps=average_speed_mbps,
+                    )
+                    if is_suspicious
+                    else None
                 )
                 snapshot.detected_at = now if is_suspicious else None
                 snapshot.updated_at = now
@@ -154,7 +246,8 @@ class TrafficMonitor:
                             previous_traffic_bytes=previous_traffic,
                             current_traffic_bytes=current_traffic,
                             delta_bytes=delta,
-                            anomaly_threshold_bytes=self._anomaly_threshold_bytes,
+                            average_speed_mbps=average_speed_mbps,
+                            speed_threshold_mbps=self._alert_speed_mbps,
                             should_block=should_block,
                             blocked=bool(snapshot.is_blocked),
                             detected_at=now,
@@ -192,7 +285,7 @@ class TrafficMonitor:
         notifications_sent = await self._notify_anomalies(anomaly_notifications)
 
         return TrafficMonitorResult(
-            total_rwms_users=len(rwms_users),
+            total_rwms_users=0,
             matched_users=len(users),
             created_snapshots=created,
             updated_snapshots=updated,
@@ -202,32 +295,20 @@ class TrafficMonitor:
             skipped_long_subscriptions=skipped_long_subscriptions,
         )
 
-    async def _get_all_rwms_users(self):
-        offset = 0
-        count = 1000
-        users = []
+    @staticmethod
+    def _calculate_speed_mbps(delta_bytes: int, elapsed_seconds: float) -> float:
+        return (delta_bytes * 8) / elapsed_seconds / 1_000_000
 
-        while True:
-            response = await self._rwms_client.get_all_users(offset=offset, count=count)
-            if response is None:
-                return []
-
-            users.extend(response.users)
-            fetched = len(response.users)
-            if fetched == 0:
-                break
-
-            offset += fetched
-            total = int(getattr(response, "total", 0) or 0)
-            if total > 0 and offset >= total:
-                break
-
-        return users
-
-    def _build_reason(self, delta: int) -> str:
+    def _build_reason(
+        self,
+        delta: int,
+        elapsed_seconds: float,
+        average_speed_mbps: float,
+    ) -> str:
         return (
-            f"traffic delta {delta} bytes reached threshold "
-            f"{self._anomaly_threshold_bytes} bytes"
+            f"average speed {average_speed_mbps:.2f} Mbps over "
+            f"{elapsed_seconds:.0f}s reached threshold "
+            f"{self._alert_speed_mbps} Mbps; delta={delta} bytes"
         )
 
     async def _notify_anomalies(

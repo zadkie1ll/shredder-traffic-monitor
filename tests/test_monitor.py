@@ -35,8 +35,10 @@ class FakeRwmsClient:
     def __init__(self, users: list[FakeRwmsUser]) -> None:
         self.users = users
         self.disabled = []
+        self.calls = []
 
     async def get_all_users(self, offset: int, count: int):
+        self.calls.append((offset, count))
         return FakeRwmsResponse(
             users=self.users[offset : offset + count],
             total=len(self.users),
@@ -104,7 +106,7 @@ async def test_first_seen_user_creates_baseline_without_delta(session_maker):
     rwms = FakeRwmsClient(
         [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100)]
     )
-    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+    monitor = TrafficMonitor(session_maker, rwms, alert_speed_mbps=50)
 
     result = await monitor.run_once()
 
@@ -123,10 +125,12 @@ async def test_next_iteration_updates_delta_and_marks_suspicious(session_maker):
     rwms = FakeRwmsClient(
         [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100)]
     )
-    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+    monitor = TrafficMonitor(session_maker, rwms, alert_speed_mbps=1)
     await monitor.run_once()
 
-    rwms.users = [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=300)]
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=200_000_100)
+    ]
     result = await monitor.run_once()
 
     async with session_maker() as session:
@@ -134,8 +138,8 @@ async def test_next_iteration_updates_delta_and_marks_suspicious(session_maker):
 
     assert result.updated_snapshots == 1
     assert result.suspicious_users == 1
-    assert snapshot.last_lifetime_used_traffic_bytes == 300
-    assert snapshot.last_traffic_delta_bytes == 200
+    assert snapshot.last_lifetime_used_traffic_bytes == 200_000_100
+    assert snapshot.last_traffic_delta_bytes == 200_000_000
     assert snapshot.is_suspicious is True
     assert snapshot.detected_at is not None
 
@@ -149,13 +153,15 @@ async def test_auto_block_disables_anomalous_user_once(session_maker):
     monitor = TrafficMonitor(
         session_maker,
         rwms,
-        anomaly_threshold_bytes=200,
+        alert_speed_mbps=1,
         auto_block_enabled=True,
-        auto_block_threshold_bytes=200,
+        auto_block_speed_mbps=1,
     )
     await monitor.run_once()
 
-    rwms.users = [FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=300)]
+    rwms.users = [
+        FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=200_000_100)
+    ]
     result = await monitor.run_once()
 
     async with session_maker() as session:
@@ -176,19 +182,22 @@ async def test_suspicious_user_sends_admin_notification(session_maker):
     monitor = TrafficMonitor(
         session_maker,
         rwms,
-        anomaly_threshold_bytes=200,
+        alert_speed_mbps=1,
         notifier=notifier,
     )
     await monitor.run_once()
 
-    rwms.users = [FakeRwmsUser(username="user-7", lifetime_used_traffic_bytes=350)]
+    rwms.users = [
+        FakeRwmsUser(username="user-7", lifetime_used_traffic_bytes=250_000_100)
+    ]
     result = await monitor.run_once()
 
     assert result.notifications_sent == 1
     assert len(notifier.anomalies) == 1
     assert notifier.anomalies[0].username == "user-7"
     assert notifier.anomalies[0].telegram_id == 7
-    assert notifier.anomalies[0].delta_bytes == 250
+    assert notifier.anomalies[0].delta_bytes == 250_000_000
+    assert notifier.anomalies[0].average_speed_mbps >= 1
 
 
 @pytest.mark.asyncio
@@ -196,7 +205,7 @@ async def test_unknown_bot_user_is_skipped(session_maker):
     rwms = FakeRwmsClient(
         [FakeRwmsUser(username="unknown", lifetime_used_traffic_bytes=300)]
     )
-    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+    monitor = TrafficMonitor(session_maker, rwms, alert_speed_mbps=50)
 
     result = await monitor.run_once()
 
@@ -205,6 +214,33 @@ async def test_unknown_bot_user_is_skipped(session_maker):
     async with session_maker() as session:
         snapshots = (await session.execute(select(UserTrafficAnomaly))).scalars().all()
     assert snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_rwms_users_are_processed_by_pages(session_maker):
+    await add_user(session_maker, user_id=1, username="user-1")
+    await add_user(session_maker, user_id=2, username="user-2")
+    await add_user(session_maker, user_id=3, username="user-3")
+    rwms = FakeRwmsClient(
+        [
+            FakeRwmsUser(username="user-1", lifetime_used_traffic_bytes=100),
+            FakeRwmsUser(username="user-2", lifetime_used_traffic_bytes=200),
+            FakeRwmsUser(username="user-3", lifetime_used_traffic_bytes=300),
+        ]
+    )
+    monitor = TrafficMonitor(
+        session_maker,
+        rwms,
+        alert_speed_mbps=50,
+        rwms_page_size=2,
+    )
+
+    result = await monitor.run_once()
+
+    assert rwms.calls == [(0, 2), (2, 2)]
+    assert result.total_rwms_users == 3
+    assert result.matched_users == 3
+    assert result.created_snapshots == 3
 
 
 @pytest.mark.asyncio
@@ -227,7 +263,7 @@ async def test_user_with_year_or_longer_subscription_is_skipped(session_maker):
             )
         ]
     )
-    monitor = TrafficMonitor(session_maker, rwms, anomaly_threshold_bytes=200)
+    monitor = TrafficMonitor(session_maker, rwms, alert_speed_mbps=50)
 
     result = await monitor.run_once()
 

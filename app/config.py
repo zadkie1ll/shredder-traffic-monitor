@@ -3,10 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-
-GIB = 1024 * 1024 * 1024
-
-
 def _get_str(name: str, default: str | None = None) -> str | None:
     value = os.getenv(name)
     if value in (None, ""):
@@ -54,6 +50,7 @@ def _get_int_list(*names: str) -> list[int]:
 class Settings:
     log_level: str
     interval_seconds: int
+    rwms_page_size: int
     rwms_address: str
     rwms_port: int
     pg_host: str
@@ -61,9 +58,9 @@ class Settings:
     pg_user: str
     pg_password: str
     pg_db: str
-    anomaly_threshold_bytes: int
+    alert_speed_mbps: int
     auto_block_enabled: bool
-    auto_block_threshold_bytes: int
+    auto_block_speed_mbps: int
     create_schema: bool
     telegram_bot_token: str | None
     telegram_notify_chat_ids: list[int]
@@ -100,6 +97,7 @@ class Settings:
         return cls(
             log_level=_get_str("TRAFFIC_MONITOR_LOG_LEVEL", "info") or "info",
             interval_seconds=_get_int("TRAFFIC_MONITOR_INTERVAL_SECONDS", 600),
+            rwms_page_size=_get_int("TRAFFIC_MONITOR_RWMS_PAGE_SIZE", 500),
             rwms_address=rwms_address or "",
             rwms_port=rwms_port,
             pg_host=pg_host or "",
@@ -110,14 +108,11 @@ class Settings:
             pg_user=pg_user or "",
             pg_password=pg_password or "",
             pg_db=pg_db or "",
-            anomaly_threshold_bytes=_get_int(
-                "TRAFFIC_MONITOR_ANOMALY_THRESHOLD_BYTES",
-                50 * GIB,
-            ),
+            alert_speed_mbps=_get_int("TRAFFIC_MONITOR_ALERT_SPEED_MBPS", 50),
             auto_block_enabled=_get_bool("TRAFFIC_MONITOR_AUTO_BLOCK_ENABLED"),
-            auto_block_threshold_bytes=_get_int(
-                "TRAFFIC_MONITOR_AUTO_BLOCK_THRESHOLD_BYTES",
-                100 * GIB,
+            auto_block_speed_mbps=_get_int(
+                "TRAFFIC_MONITOR_AUTO_BLOCK_SPEED_MBPS",
+                100,
             ),
             create_schema=_get_bool("TRAFFIC_MONITOR_CREATE_SCHEMA"),
             telegram_bot_token=_get_str(

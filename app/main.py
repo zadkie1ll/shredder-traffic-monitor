@@ -45,17 +45,21 @@ async def run(settings: Settings) -> None:
         monitor = TrafficMonitor(
             session_maker=session_maker,
             rwms_client=rwms_client,
-            anomaly_threshold_bytes=settings.anomaly_threshold_bytes,
+            alert_speed_mbps=settings.alert_speed_mbps,
             auto_block_enabled=settings.auto_block_enabled,
-            auto_block_threshold_bytes=settings.auto_block_threshold_bytes,
+            auto_block_speed_mbps=settings.auto_block_speed_mbps,
+            rwms_page_size=settings.rwms_page_size,
             notifier=notifier,
         )
         logging.getLogger("startup").info(
-            "started traffic monitor: interval=%ss anomaly_threshold=%s "
-            "auto_block=%s telegram_notifications=%s",
+            "started traffic monitor: interval=%ss alert_speed=%sMbps "
+            "auto_block=%s auto_block_speed=%sMbps rwms_page_size=%s "
+            "telegram_notifications=%s",
             settings.interval_seconds,
-            settings.anomaly_threshold_bytes,
+            settings.alert_speed_mbps,
             settings.auto_block_enabled,
+            settings.auto_block_speed_mbps,
+            settings.rwms_page_size,
             notifier is not None,
         )
         await monitor.run_forever(settings.interval_seconds)
