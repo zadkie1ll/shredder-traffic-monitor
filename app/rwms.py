@@ -12,7 +12,7 @@ class RwmsClient(CommonRwmsClient):
         try:
             response = await self.update_user(
                 proto.UpdateUserRequest(
-                    uuid=user.uuid,
+                    user_id=user.id,
                     status=proto.UserStatus.DISABLED,
                     active_internal_squads=[
                         squad.uuid for squad in user.active_internal_squads
@@ -23,7 +23,7 @@ class RwmsClient(CommonRwmsClient):
             logging.getLogger(self.__class__.__name__).error(
                 "error disabling user username=%s uuid=%s: %s",
                 getattr(user, "username", None),
-                getattr(user, "uuid", None),
+                getattr(user, "id", None) or getattr(user, "uuid", None),
                 exc,
             )
             return False
